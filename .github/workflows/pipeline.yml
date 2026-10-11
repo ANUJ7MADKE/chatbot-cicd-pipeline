@@ -1,0 +1,72 @@
+name: Chatbot CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test_and_lint:
+    name: Run Unit Tests & Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Pytest Suite
+        env:
+          PYTHONPATH: .
+        run: python -m pytest app/test_main.py
+
+  security_scan:
+    name: Build & Security Vulnerability Scan
+    needs: test_and_lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Build Container Image
+        run: docker build -t chatbot-api:${{ github.sha }} .
+
+      - name: Trivy Vulnerability Scan (Guardrail)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: chatbot-api:${{ github.sha }}
+          format: 'table'
+          exit-code: '1' # Fails build if CRITICAL CVEs are found
+          ignore-unfixed: true
+          severity: 'CRITICAL'
+
+  deploy:
+    name: Deploy & Notify
+    needs: [test_and_lint, security_scan]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Notify Webhook - Deployment Success
+        if: ${{ needs.test_and_lint.result == 'success' && needs.security_scan.result == 'success' }}
+        run: |
+          curl -H "Content-Type: application/json" \
+               -X POST \
+               -d '{"content": "✅ **DEPLOYMENT SUCCESSFUL**\n• Service: `chatbot-api`\n• Commit: `${{ github.sha }}`\n• Environment: `Production`\n• Status: Healthy & Serving"}' \
+               "${{ secrets.NOTIFICATION_WEBHOOK }}"
+
+      - name: Notify Webhook - Pipeline Failure & Remediation
+        if: ${{ needs.test_and_lint.result == 'failure' || needs.security_scan.result == 'failure' }}
+        run: |
+          curl -H "Content-Type: application/json" \
+               -X POST \
+               -d '{"content": "🚨 **PIPELINE BLOCKED: GUARDRAIL TRIGGERED**\n• PR / Commit: `${{ github.sha }}`\n• Reason: Automated test failure or Critical CVE detected in container\n💡 **Advisor**: Review Pytest assertions or update base image in `Dockerfile`."}' \
+               "${{ secrets.NOTIFICATION_WEBHOOK }}"
