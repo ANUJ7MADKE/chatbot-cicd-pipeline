@@ -6,6 +6,10 @@ on:
   pull_request:
     branches: [ main ]
 
+permissions:
+  contents: read
+  packages: write # required to publish the image to GHCR
+
 jobs:
   test_and_lint:
     name: Run Unit Tests & Lint
@@ -22,26 +26,37 @@ jobs:
       - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Lint with Ruff
+        run: ruff check app/
 
       - name: Run Pytest Suite
-        env:
-          PYTHONPATH: .
-        run: python -m pytest app/test_main.py
+        run: python -m pytest -v
 
   security_scan:
-    name: Build & Security Vulnerability Scan
+    name: Build, Scan & Publish
     needs: test_and_lint
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Build Container Image
-        run: docker build -t chatbot-api:${{ github.sha }} .
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
-      - name: Trivy Vulnerability Scan (Guardrail)
-        uses: aquasecurity/trivy-action@master
+      - name: Build Container Image (scan candidate)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          push: false
+          tags: chatbot-api:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Trivy Vulnerability Scan (CRITICAL guardrail)
+        uses: aquasecurity/trivy-action@0.36.0
         with:
           image-ref: chatbot-api:${{ github.sha }}
           format: 'table'
@@ -49,18 +64,38 @@ jobs:
           ignore-unfixed: true
           severity: 'CRITICAL'
 
-  deploy:
+      - name: Login to GitHub Container Registry
+        if: github.ref == 'refs/heads/main'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push Image to GHCR
+        if: github.ref == 'refs/heads/main'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ghcr.io/tatva06/chatbot-cicd-pipeline:latest
+            ghcr.io/tatva06/chatbot-cicd-pipeline:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  notify:
     name: Deploy & Notify
     needs: [test_and_lint, security_scan]
     runs-on: ubuntu-latest
-    if: always()
+    if: ${{ always() && github.event_name == 'push' }}
     steps:
       - name: Notify Webhook - Deployment Success
         if: ${{ needs.test_and_lint.result == 'success' && needs.security_scan.result == 'success' }}
         run: |
           curl -H "Content-Type: application/json" \
                -X POST \
-               -d '{"content": "✅ **DEPLOYMENT SUCCESSFUL**\n• Service: `chatbot-api`\n• Commit: `${{ github.sha }}`\n• Environment: `Production`\n• Status: Healthy & Serving"}' \
+               -d '{"content": "✅ **DEPLOYMENT SUCCESSFUL**\n• Service: `chatbot-api`\n• Commit: `${{ github.sha }}`\n• Artifact: `ghcr.io/tatva06/chatbot-cicd-pipeline:${{ github.sha }}`\n• Status: Healthy & Serving"}' \
                "${{ secrets.NOTIFICATION_WEBHOOK }}"
 
       - name: Notify Webhook - Pipeline Failure & Remediation
@@ -68,5 +103,5 @@ jobs:
         run: |
           curl -H "Content-Type: application/json" \
                -X POST \
-               -d '{"content": "🚨 **PIPELINE BLOCKED: GUARDRAIL TRIGGERED**\n• PR / Commit: `${{ github.sha }}`\n• Reason: Automated test failure or Critical CVE detected in container\n💡 **Advisor**: Review Pytest assertions or update base image in `Dockerfile`."}' \
+               -d '{"content": "🚨 **PIPELINE BLOCKED: GUARDRAIL TRIGGERED**\n• Commit: `${{ github.sha }}`\n• Reason: Automated test failure or Critical CVE detected in container\n💡 **Advisor**: Review Pytest assertions or update base image in `Dockerfile`."}' \
                "${{ secrets.NOTIFICATION_WEBHOOK }}"
