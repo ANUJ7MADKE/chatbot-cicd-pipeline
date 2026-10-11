@@ -1,0 +1,19 @@
+# Version control
+.git
+.gitignore
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+
+# Tool caches
+.pytest_cache/
+.ruff_cache/
+
+# Docs (not needed inside the image)
+README.md
+
+# OS
+.DS_Store
