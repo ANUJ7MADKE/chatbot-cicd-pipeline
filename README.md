@@ -36,7 +36,7 @@ Every commit to `main` and every pull request flows through the pipeline. If tes
 | CI/CD | GitHub Actions |
 | Security scanning | Trivy (`aquasecurity/trivy-action` v0.36.0, pinned to its commit SHA): HIGH + CRITICAL guardrail |
 | Registries | GitHub Container Registry (GHCR), Amazon ECR |
-| Hosting | AWS Lambda (container image + AWS Lambda Web Adapter), public Function URL |
+| Hosting | AWS Lambda (container image + AWS Lambda Web Adapter, vendored and checksum-verified), public Function URL |
 | Cloud auth | GitHub OIDC → least-privilege IAM role (no stored AWS keys) |
 | Notifications | Webhook (webhook.site) with a structured JSON payload |
 
@@ -53,6 +53,7 @@ chatbot-cicd-pipeline/
 │   ├── __init__.py
 │   ├── main.py                       # FastAPI application
 │   └── test_main.py                  # pytest suite (8 tests)
+├── vendor/lambda-adapter/            # AWS Lambda Web Adapter binary + provenance/checksum
 ├── infra/
 │   ├── aws-bootstrap.sh              # one-time AWS setup (ECR, Lambda, OIDC role)
 │   └── aws-teardown.sh               # removes all AWS resources
@@ -106,7 +107,7 @@ Example notifications:
  "advice": "Upgrade the vulnerable package in requirements.txt or update the base image in the Dockerfile."}
 ```
 
-Possible `status` values: `DEPLOYED`, `PUBLISHED` (AWS not configured), `PR_CHECKS_PASSED`, `BLOCKED`, `ROLLED_BACK`.
+Possible `status` values: `DEPLOYED`, `PUBLISHED` (AWS not configured), `PR_CHECKS_PASSED`, `BLOCKED` (tests, container build or Trivy), `FAILED` (registry push), `ROLLED_BACK`.
 
 ### Secrets
 
@@ -122,7 +123,9 @@ Possible `status` values: `DEPLOYED`, `PUBLISHED` (AWS not configured), `PR_CHEC
 AWS_PROFILE=<admin-profile> ./infra/aws-bootstrap.sh
 ```
 
-This creates the ECR repository, the Lambda function with its public URL, and an IAM role that only GitHub Actions runs from this repository's `main` branch (or `production` environment) can assume. That role can push to this ECR repository and update this one function, nothing else. `./infra/aws-teardown.sh` removes everything.
+This creates the ECR repository, the Lambda function with its public URL, and an IAM role that only GitHub Actions runs from this repository's `main` branch (or `production` environment) can assume. GitHub's OIDC token identifies the repository by its immutable owner and repository IDs (`repo:OWNER@OWNER_ID/REPO@REPO_ID:...`), so a deleted-and-recreated repository with the same name cannot assume the role. The role can push to this ECR repository and update this one function, nothing else. `./infra/aws-teardown.sh` removes everything.
+
+The Lambda Web Adapter binary is committed under `vendor/` rather than pulled from `public.ecr.aws` at build time: that registry rate-limits anonymous pulls from shared CI runners, which made builds fail at random. The Dockerfile verifies its SHA-256 on every build.
 
 ## Demonstrating the Guardrails
 

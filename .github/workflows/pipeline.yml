@@ -48,6 +48,8 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       aws_enabled: ${{ steps.aws.outputs.enabled }}
+      build: ${{ steps.result.outputs.build }}
+      trivy: ${{ steps.result.outputs.trivy }}
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -56,6 +58,7 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Build Container Image (scan candidate)
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -66,6 +69,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Trivy Vulnerability Scan (HIGH/CRITICAL guardrail)
+        id: trivy
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: chatbot-api:${{ github.sha }}
@@ -116,6 +120,16 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: Record which step failed (for the notification)
+        id: result
+        if: always()
+        env:
+          BUILD: ${{ steps.build.outcome }}
+          TRIVY: ${{ steps.trivy.outcome }}
+        run: |
+          echo "build=$BUILD" >> "$GITHUB_OUTPUT"
+          echo "trivy=$TRIVY" >> "$GITHUB_OUTPUT"
+
   deploy:
     name: Deploy to AWS Lambda
     needs: security_scan
@@ -156,8 +170,13 @@ jobs:
         run: |
           URL=$(aws lambda get-function-url-config --function-name "$LAMBDA_FUNCTION" --query FunctionUrl --output text)
           echo "url=$URL" >> "$GITHUB_OUTPUT"
-          curl -fsS --retry 5 --retry-all-errors "$URL" | grep -q healthy
-          curl -fsS -X POST "${URL}chat" -H "Content-Type: application/json" -d '{"message":"ping"}' | grep -q pong
+          HEALTH=$(curl -fsS --retry 5 --retry-delay 3 --retry-all-errors "$URL")
+          echo "GET /      -> $HEALTH"
+          [[ "$HEALTH" == *healthy* ]]
+          CHAT=$(curl -fsS --retry 3 --retry-delay 3 --retry-all-errors -X POST "${URL}chat" \
+            -H "Content-Type: application/json" -d '{"message":"ping"}')
+          echo "POST /chat -> $CHAT"
+          [[ "$CHAT" == *pong* ]]
           echo "Live at $URL"
 
       - name: Automatic rollback on failed smoke test
@@ -180,6 +199,8 @@ jobs:
           WEBHOOK: ${{ secrets.NOTIFICATION_WEBHOOK }}
           TESTS: ${{ needs.test_and_lint.result }}
           SCAN: ${{ needs.security_scan.result }}
+          BUILD_STEP: ${{ needs.security_scan.outputs.build }}
+          TRIVY_STEP: ${{ needs.security_scan.outputs.trivy }}
           DEPLOY: ${{ needs.deploy.result }}
           LIVE_URL: ${{ needs.deploy.outputs.url }}
           EVENT: ${{ github.event_name }}
@@ -193,9 +214,15 @@ jobs:
           if [ "$TESTS" = "failure" ]; then
             STATUS="BLOCKED"; STAGE="Unit tests / lint"
             ADVICE="Run pytest and ruff locally and fix the failing assertion or lint error."
-          elif [ "$SCAN" = "failure" ]; then
+          elif [ "$SCAN" = "failure" ] && [ "$TRIVY_STEP" = "failure" ]; then
             STATUS="BLOCKED"; STAGE="Trivy security scan"
             ADVICE="Upgrade the vulnerable package in requirements.txt or update the base image in the Dockerfile."
+          elif [ "$SCAN" = "failure" ] && [ "$BUILD_STEP" = "failure" ]; then
+            STATUS="BLOCKED"; STAGE="Container build"
+            ADVICE="The Docker image failed to build. Open the run log for the exact error."
+          elif [ "$SCAN" = "failure" ]; then
+            STATUS="FAILED"; STAGE="Publish to registries"
+            ADVICE="The image passed the scan but could not be pushed. Open the run log for the exact error."
           elif [ "$DEPLOY" = "failure" ]; then
             STATUS="ROLLED_BACK"; STAGE="Deploy / smoke test"
             ADVICE="The previous version was restored automatically. Check the Lambda logs in CloudWatch."
