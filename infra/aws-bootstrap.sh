@@ -124,7 +124,7 @@ aws iam put-role-policy --role-name "$DEPLOY_ROLE" --policy-name deploy-chatbot 
     {"Sid": "EcrPush", "Effect": "Allow", "Resource": "arn:aws:ecr:$REGION:$ACCOUNT_ID:repository/$APP",
      "Action": ["ecr:BatchCheckLayerAvailability", "ecr:InitiateLayerUpload", "ecr:UploadLayerPart",
                 "ecr:CompleteLayerUpload", "ecr:PutImage", "ecr:BatchGetImage",
-                "ecr:GetDownloadUrlForLayer", "ecr:GetRepositoryPolicy", "ecr:SetRepositoryPolicy"]},
+                "ecr:GetDownloadUrlForLayer"]},
     {"Sid": "LambdaDeploy", "Effect": "Allow", "Resource": "arn:aws:lambda:$REGION:$ACCOUNT_ID:function:$APP",
      "Action": ["lambda:UpdateFunctionCode", "lambda:GetFunction",
                 "lambda:GetFunctionConfiguration", "lambda:GetFunctionUrlConfig"]}
