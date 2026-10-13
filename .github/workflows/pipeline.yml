@@ -85,23 +85,51 @@ jobs:
           cache-to: type=gha,mode=max
 
   notify:
-    name: Deploy & Notify
+    name: Notify
     needs: [test_and_lint, security_scan]
     runs-on: ubuntu-latest
-    if: ${{ always() && github.event_name == 'push' }}
+    if: always()
     steps:
-      - name: Notify Webhook - Deployment Success
-        if: ${{ needs.test_and_lint.result == 'success' && needs.security_scan.result == 'success' }}
+      - name: Send pipeline notification
+        env:
+          WEBHOOK: ${{ secrets.NOTIFICATION_WEBHOOK }}
+          TESTS: ${{ needs.test_and_lint.result }}
+          SCAN: ${{ needs.security_scan.result }}
+          EVENT: ${{ github.event_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          IMAGE: ghcr.io/tatva06/chatbot-cicd-pipeline
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          curl -H "Content-Type: application/json" \
-               -X POST \
-               -d '{"content": "✅ **DEPLOYMENT SUCCESSFUL**\n• Service: `chatbot-api`\n• Commit: `${{ github.sha }}`\n• Artifact: `ghcr.io/tatva06/chatbot-cicd-pipeline:${{ github.sha }}`\n• Status: Healthy & Serving"}' \
-               "${{ secrets.NOTIFICATION_WEBHOOK }}"
+          if [ -z "$WEBHOOK" ]; then echo "NOTIFICATION_WEBHOOK not set, skipping."; exit 0; fi
+          SHORT="${SHA:0:7}"
+          if [ "$EVENT" = "pull_request" ]; then SOURCE="PR #$PR_NUMBER"; else SOURCE="main"; fi
 
-      - name: Notify Webhook - Pipeline Failure & Remediation
-        if: ${{ needs.test_and_lint.result == 'failure' || needs.security_scan.result == 'failure' }}
-        run: |
-          curl -H "Content-Type: application/json" \
-               -X POST \
-               -d '{"content": "🚨 **PIPELINE BLOCKED: GUARDRAIL TRIGGERED**\n• Commit: `${{ github.sha }}`\n• Reason: Automated test failure or Critical CVE detected in container\n💡 **Advisor**: Review Pytest assertions or update base image in `Dockerfile`."}' \
-               "${{ secrets.NOTIFICATION_WEBHOOK }}"
+          if [ "$TESTS" = "failure" ]; then
+            STAGE="Unit tests / lint"
+            HINT="Run pytest and ruff locally and fix the failing assertion or lint error."
+          elif [ "$SCAN" = "failure" ]; then
+            STAGE="Trivy security scan"
+            HINT="Upgrade the vulnerable package in requirements.txt or update the base image in the Dockerfile."
+          fi
+
+          if [ -n "${STAGE:-}" ]; then
+            MSG="🚨 **PIPELINE BLOCKED** at **$STAGE**
+          • Source: $SOURCE · Commit: \`$SHORT\`
+          💡 **Advisor**: $HINT
+          🔎 $RUN_URL"
+          elif [ "$SCAN" = "success" ] && [ "$EVENT" = "pull_request" ]; then
+            MSG="🟢 **$SOURCE passed all checks** (tests, lint, Trivy) and is safe to merge.
+          🔎 $RUN_URL"
+          elif [ "$SCAN" = "success" ]; then
+            MSG="✅ **DEPLOYMENT SUCCESSFUL**
+          • Service: \`chatbot-api\` · Commit: \`$SHORT\`
+          • Artifact: \`$IMAGE:$SHA\`
+          🔎 $RUN_URL"
+          else
+            echo "Run was cancelled or skipped; nothing to report."; exit 0
+          fi
+
+          # jq builds the JSON so quotes or newlines in the message can't break the payload
+          jq -n --arg content "$MSG" '{content: $content}' \
+            | curl -fsS -H "Content-Type: application/json" -d @- "$WEBHOOK"
