@@ -13,7 +13,7 @@ set -euo pipefail
 REGION="${AWS_REGION:-ap-south-1}"
 export AWS_REGION="$REGION" AWS_DEFAULT_REGION="$REGION"
 APP="chatbot-api"
-GITHUB_REPO="${GITHUB_REPO:-Tatva06/chatbot-cicd-pipeline}"
+GITHUB_REPO="${GITHUB_REPO:-ANUJ7MADKE/chatbot-cicd-pipeline}"
 
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 REGISTRY="$ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com"

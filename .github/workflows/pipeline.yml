@@ -16,7 +16,7 @@ env:
   AWS_REGION: ap-south-1
   ECR_REPOSITORY: chatbot-api
   LAMBDA_FUNCTION: chatbot-api
-  GHCR_IMAGE: ghcr.io/tatva06/chatbot-cicd-pipeline
+  GHCR_IMAGE: ghcr.io/anuj7madke/chatbot-cicd-pipeline
 
 jobs:
   test_and_lint:
