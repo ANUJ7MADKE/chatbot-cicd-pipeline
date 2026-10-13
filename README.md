@@ -34,7 +34,7 @@ Every commit to `main` and every pull request flows through the pipeline. If tes
 | Linting | ruff 0.17.0 |
 | Containerization | Docker (multi-stage build, non-root user, `python:3.12-slim`) |
 | CI/CD | GitHub Actions |
-| Security scanning | Trivy (`aquasecurity/trivy-action@0.36.0`): HIGH + CRITICAL guardrail |
+| Security scanning | Trivy (`aquasecurity/trivy-action` v0.36.0, pinned to its commit SHA): HIGH + CRITICAL guardrail |
 | Registries | GitHub Container Registry (GHCR), Amazon ECR |
 | Hosting | AWS Lambda (container image + AWS Lambda Web Adapter), public Function URL |
 | Cloud auth | GitHub OIDC → least-privilege IAM role (no stored AWS keys) |
