@@ -11,7 +11,7 @@ flowchart LR
     subgraph GH[CI/CD Pipeline]
         direction TB
         T[Test & Lint<br/>pytest + ruff] --> B[Build Image<br/>multi-stage Docker]
-        B --> V{Trivy Scan<br/>CRITICAL CVEs?}
+        B --> V{Trivy Scan<br/>HIGH/CRITICAL CVEs?}
         V -->|pass| P[Push to GHCR<br/>latest + sha tag]
         V -->|fail| X[Pipeline Blocked]
     end
@@ -21,18 +21,18 @@ flowchart LR
     X --> N2[🚨 Guardrail Alert +<br/>Remediation Hint]
 ```
 
-Every commit to `main` and every pull request flows through the pipeline. If automated tests fail or Trivy finds a **CRITICAL** vulnerability in the image, the pipeline is blocked *before* the image reaches the registry, and a failure notification with a remediation hint is sent to the team channel.
+Every commit to `main` and every pull request flows through the pipeline. If automated tests fail or Trivy finds a fixable **HIGH or CRITICAL** vulnerability in the image, the pipeline is blocked *before* the image reaches the registry, and a failure notification with a remediation hint is sent to the team channel.
 
 ## Tech Stack
 
 | Layer | Tool |
 |---|---|
-| API | FastAPI 0.110.0 + Uvicorn 0.28.0 (Python 3.11) |
-| Testing | pytest 8.1.1, httpx 0.27.0 |
+| API | FastAPI 0.143.0 + Uvicorn 0.54.0 (Python 3.12) |
+| Testing | pytest 9.1.1, httpx 0.28.1 |
 | Linting | ruff 0.17.0 |
-| Containerization | Docker (multi-stage build, non-root user, minimal `python:3.11-slim` image) |
+| Containerization | Docker (multi-stage build, non-root user, minimal `python:3.12-slim` image) |
 | CI/CD | GitHub Actions (`checkout@v4`, `setup-python@v5`, `setup-buildx-action@v3`, `build-push-action@v6`, `login-action@v3`) |
-| Security scanning | Trivy (`aquasecurity/trivy-action@0.36.0`) — CRITICAL-severity guardrail |
+| Security scanning | Trivy (`aquasecurity/trivy-action@0.36.0`) — HIGH + CRITICAL guardrail |
 | Artifact registry | GitHub Container Registry (GHCR) |
 | Notifications | Generic webhook (Discord-compatible JSON payload) |
 
@@ -88,7 +88,7 @@ docker run -p 8000:8000 chatbot-api
 Triggered on **push to `main`** and **pull requests targeting `main`**:
 
 1. **Run Unit Tests & Lint** — installs dependencies, runs `ruff check app/`, then `pytest` (8 tests covering every endpoint, fallback behavior, and 422 validation).
-2. **Build, Scan & Publish** — builds the image with Buildx, scans it with Trivy. Any CRITICAL CVE fails the pipeline (`exit-code: 1`). On `main` pushes only, the image is pushed to GHCR as `ghcr.io/tatva06/chatbot-cicd-pipeline` with `latest` and commit-sha tags.
+2. **Build, Scan & Publish** — builds the image with Buildx, scans it with Trivy. Any fixable HIGH or CRITICAL CVE fails the pipeline (`exit-code: 1`). On `main` pushes only, the image is pushed to GHCR as `ghcr.io/tatva06/chatbot-cicd-pipeline` with `latest` and commit-sha tags.
 3. **Deploy & Notify** — on `main` pushes, posts a success or failure message (with remediation advice) to the configured webhook.
 
 ### Required Secrets

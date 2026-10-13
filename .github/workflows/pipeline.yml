@@ -21,7 +21,7 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.12"
 
       - name: Install Dependencies
         run: |
@@ -55,14 +55,14 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Trivy Vulnerability Scan (CRITICAL guardrail)
+      - name: Trivy Vulnerability Scan (HIGH/CRITICAL guardrail)
         uses: aquasecurity/trivy-action@0.36.0
         with:
           image-ref: chatbot-api:${{ github.sha }}
           format: 'table'
-          exit-code: '1' # Fails build if CRITICAL CVEs are found
+          exit-code: '1' # Fails build on fixable HIGH or CRITICAL CVEs
           ignore-unfixed: true
-          severity: 'CRITICAL'
+          severity: 'CRITICAL,HIGH'
 
       - name: Login to GitHub Container Registry
         if: github.ref == 'refs/heads/main'
