@@ -5,10 +5,18 @@ on:
     branches: [ main ]
   pull_request:
     branches: [ main ]
+  workflow_dispatch:
 
 permissions:
   contents: read
-  packages: write # required to publish the image to GHCR
+  packages: write # publish the image to GHCR
+  id-token: write # OIDC: assume the AWS deploy role without stored AWS keys
+
+env:
+  AWS_REGION: ap-south-1
+  ECR_REPOSITORY: chatbot-api
+  LAMBDA_FUNCTION: chatbot-api
+  GHCR_IMAGE: ghcr.io/tatva06/chatbot-cicd-pipeline
 
 jobs:
   test_and_lint:
@@ -38,6 +46,8 @@ jobs:
     name: Build, Scan & Publish
     needs: test_and_lint
     runs-on: ubuntu-latest
+    outputs:
+      aws_enabled: ${{ steps.aws.outputs.enabled }}
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -64,29 +74,104 @@ jobs:
           ignore-unfixed: true
           severity: 'CRITICAL,HIGH'
 
+      # Everything below runs only for main (push or manual run), never for PRs
+      - name: Check whether AWS deployment is configured
+        id: aws
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        env:
+          ROLE: ${{ secrets.AWS_ROLE_ARN }}
+        run: echo "enabled=$([ -n "$ROLE" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
       - name: Login to GitHub Container Registry
-        if: github.ref == 'refs/heads/main'
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Push Image to GHCR
-        if: github.ref == 'refs/heads/main'
+      - name: Configure AWS credentials (OIDC)
+        if: steps.aws.outputs.enabled == 'true'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: ecr
+        if: steps.aws.outputs.enabled == 'true'
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Push image to GHCR (and ECR when AWS is configured)
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         uses: docker/build-push-action@v6
         with:
           context: .
           push: true
+          provenance: false # Lambda only accepts single-platform image manifests
           tags: |
-            ghcr.io/tatva06/chatbot-cicd-pipeline:latest
-            ghcr.io/tatva06/chatbot-cicd-pipeline:${{ github.sha }}
+            ${{ env.GHCR_IMAGE }}:latest
+            ${{ env.GHCR_IMAGE }}:${{ github.sha }}
+            ${{ steps.ecr.outputs.registry && format('{0}/{1}:{2}', steps.ecr.outputs.registry, env.ECR_REPOSITORY, github.sha) || '' }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+  deploy:
+    name: Deploy to AWS Lambda
+    needs: security_scan
+    if: needs.security_scan.outputs.aws_enabled == 'true'
+    runs-on: ubuntu-latest
+    concurrency: production # never run two deployments at once
+    environment:
+      name: production
+      url: ${{ steps.smoke.outputs.url }}
+    outputs:
+      url: ${{ steps.smoke.outputs.url }}
+    steps:
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Record running version (for rollback)
+        id: previous
+        run: |
+          IMAGE=$(aws lambda get-function --function-name "$LAMBDA_FUNCTION" --query Code.ImageUri --output text)
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+
+      - name: Roll out new image
+        env:
+          IMAGE: ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+        run: |
+          aws lambda update-function-code --function-name "$LAMBDA_FUNCTION" --image-uri "$IMAGE" >/dev/null
+          aws lambda wait function-updated-v2 --function-name "$LAMBDA_FUNCTION"
+
+      - name: Post-deployment smoke test
+        id: smoke
+        run: |
+          URL=$(aws lambda get-function-url-config --function-name "$LAMBDA_FUNCTION" --query FunctionUrl --output text)
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+          curl -fsS --retry 5 --retry-all-errors "$URL" | grep -q healthy
+          curl -fsS -X POST "${URL}chat" -H "Content-Type: application/json" -d '{"message":"ping"}' | grep -q pong
+          echo "Live at $URL"
+
+      - name: Automatic rollback on failed smoke test
+        if: failure() && steps.previous.outputs.image != ''
+        env:
+          IMAGE: ${{ steps.previous.outputs.image }}
+        run: |
+          echo "Smoke test failed, restoring $IMAGE"
+          aws lambda update-function-code --function-name "$LAMBDA_FUNCTION" --image-uri "$IMAGE" >/dev/null
+          aws lambda wait function-updated-v2 --function-name "$LAMBDA_FUNCTION"
+
   notify:
     name: Notify
-    needs: [test_and_lint, security_scan]
+    needs: [test_and_lint, security_scan, deploy]
     runs-on: ubuntu-latest
     if: always()
     steps:
@@ -95,41 +180,41 @@ jobs:
           WEBHOOK: ${{ secrets.NOTIFICATION_WEBHOOK }}
           TESTS: ${{ needs.test_and_lint.result }}
           SCAN: ${{ needs.security_scan.result }}
+          DEPLOY: ${{ needs.deploy.result }}
+          LIVE_URL: ${{ needs.deploy.outputs.url }}
           EVENT: ${{ github.event_name }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-          IMAGE: ghcr.io/tatva06/chatbot-cicd-pipeline
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           if [ -z "$WEBHOOK" ]; then echo "NOTIFICATION_WEBHOOK not set, skipping."; exit 0; fi
-          SHORT="${SHA:0:7}"
           if [ "$EVENT" = "pull_request" ]; then SOURCE="PR #$PR_NUMBER"; else SOURCE="main"; fi
 
           if [ "$TESTS" = "failure" ]; then
-            STAGE="Unit tests / lint"
-            HINT="Run pytest and ruff locally and fix the failing assertion or lint error."
+            STATUS="BLOCKED"; STAGE="Unit tests / lint"
+            ADVICE="Run pytest and ruff locally and fix the failing assertion or lint error."
           elif [ "$SCAN" = "failure" ]; then
-            STAGE="Trivy security scan"
-            HINT="Upgrade the vulnerable package in requirements.txt or update the base image in the Dockerfile."
-          fi
-
-          if [ -n "${STAGE:-}" ]; then
-            MSG="🚨 **PIPELINE BLOCKED** at **$STAGE**
-          • Source: $SOURCE · Commit: \`$SHORT\`
-          💡 **Advisor**: $HINT
-          🔎 $RUN_URL"
+            STATUS="BLOCKED"; STAGE="Trivy security scan"
+            ADVICE="Upgrade the vulnerable package in requirements.txt or update the base image in the Dockerfile."
+          elif [ "$DEPLOY" = "failure" ]; then
+            STATUS="ROLLED_BACK"; STAGE="Deploy / smoke test"
+            ADVICE="The previous version was restored automatically. Check the Lambda logs in CloudWatch."
           elif [ "$SCAN" = "success" ] && [ "$EVENT" = "pull_request" ]; then
-            MSG="🟢 **$SOURCE passed all checks** (tests, lint, Trivy) and is safe to merge.
-          🔎 $RUN_URL"
+            STATUS="PR_CHECKS_PASSED"; STAGE=""; ADVICE="Tests, lint and Trivy passed. Safe to merge."
+          elif [ "$DEPLOY" = "success" ]; then
+            STATUS="DEPLOYED"; STAGE=""; IMAGE="$GHCR_IMAGE:$SHA"; ADVICE="New version is live and passed the smoke test."
           elif [ "$SCAN" = "success" ]; then
-            MSG="✅ **DEPLOYMENT SUCCESSFUL**
-          • Service: \`chatbot-api\` · Commit: \`$SHORT\`
-          • Artifact: \`$IMAGE:$SHA\`
-          🔎 $RUN_URL"
+            STATUS="PUBLISHED"; STAGE=""; IMAGE="$GHCR_IMAGE:$SHA"; ADVICE="Image published to GHCR (AWS deployment not configured)."
           else
             echo "Run was cancelled or skipped; nothing to report."; exit 0
           fi
 
-          # jq builds the JSON so quotes or newlines in the message can't break the payload
-          jq -n --arg content "$MSG" '{content: $content}' \
+          # jq builds the JSON so no value can break the payload
+          jq -n \
+            --arg status "$STATUS" --arg stage "$STAGE" --arg source "$SOURCE" \
+            --arg commit "${SHA:0:7}" --arg advice "$ADVICE" --arg live_url "$LIVE_URL" \
+            --arg image "${IMAGE:-}" --arg run_url "$RUN_URL" \
+            '{service: "chatbot-api", status: $status, failed_stage: $stage, source: $source,
+              commit: $commit, advice: $advice, live_url: $live_url, image: $image, run_url: $run_url}
+             | with_entries(select(.value != ""))' \
             | curl -fsS -H "Content-Type: application/json" -d @- "$WEBHOOK"
