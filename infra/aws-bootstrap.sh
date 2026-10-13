@@ -93,6 +93,14 @@ if ! aws iam get-open-id-connect-provider --open-id-connect-provider-arn "$OIDC_
 fi
 
 step "Pipeline deploy role: $DEPLOY_ROLE (trusted only from $GITHUB_REPO main / production)"
+# GitHub's OIDC subject embeds the immutable owner and repository IDs
+# (repo:OWNER@OWNER_ID/REPO@REPO_ID:...), so a deleted-and-recreated repo or a
+# re-registered username cannot impersonate this one. Trust both the ID form
+# and the legacy name-only form, each as an exact string.
+REPO_IDS=$(curl -fsS "https://api.github.com/repos/$GITHUB_REPO" \
+  | python3 -c 'import json,sys; r=json.load(sys.stdin); print(r["owner"]["login"], r["owner"]["id"], r["name"], r["id"])')
+read -r OWNER OWNER_ID REPO_NAME REPO_ID <<<"$REPO_IDS"
+ID_REPO="$OWNER@$OWNER_ID/$REPO_NAME@$REPO_ID"
 TRUST=$(cat <<EOF
 {
   "Version": "2012-10-17",
@@ -101,11 +109,15 @@ TRUST=$(cat <<EOF
     "Principal": {"Federated": "$OIDC_ARN"},
     "Action": "sts:AssumeRoleWithWebIdentity",
     "Condition": {
-      "StringEquals": {"$OIDC_HOST:aud": "sts.amazonaws.com"},
-      "StringLike": {"$OIDC_HOST:sub": [
-        "repo:$GITHUB_REPO:ref:refs/heads/main",
-        "repo:$GITHUB_REPO:environment:production"
-      ]}
+      "StringEquals": {
+        "$OIDC_HOST:aud": "sts.amazonaws.com",
+        "$OIDC_HOST:sub": [
+          "repo:$ID_REPO:ref:refs/heads/main",
+          "repo:$ID_REPO:environment:production",
+          "repo:$GITHUB_REPO:ref:refs/heads/main",
+          "repo:$GITHUB_REPO:environment:production"
+        ]
+      }
     }
   }]
 }
