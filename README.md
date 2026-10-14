@@ -1,6 +1,6 @@
 # Automated CI/CD Pipeline for a Containerized Chatbot with Real-Time Deployment Notifications
 
-A containerized **DevOps Chatbot API** (FastAPI) with a fully automated CI/CD pipeline on GitHub Actions: unit tests → lint → Docker build → Trivy HIGH/CRITICAL guardrail → image published to GHCR and Amazon ECR → deployed to **AWS Lambda** with a post-deployment smoke test and automatic rollback → real-time JSON notifications to a webhook.
+A containerized **DevOps Chatbot API** (FastAPI) with a fully automated CI/CD pipeline on GitHub Actions: unit tests → lint → Docker build → Trivy HIGH/CRITICAL guardrail → image published to GHCR and Amazon ECR → deployed to **AWS Lambda** with a post-deployment smoke test and automatic rollback → real-time notifications to a Discord channel.
 
 ## Architecture
 
@@ -20,7 +20,7 @@ flowchart LR
     end
 
     S -->|pass| L[(Live Function URL)]
-    GH --> W[(webhook.site<br/>JSON notification)]
+    GH --> W[(Discord channel<br/>status card)]
 ```
 
 Every commit to `main` and every pull request flows through the pipeline. If tests fail or Trivy finds a fixable **HIGH or CRITICAL** vulnerability, the pipeline stops *before* anything is published. Pull requests are checked but never deployed. Every run ends with a JSON notification that names the failed stage and gives remediation advice.
@@ -38,7 +38,7 @@ Every commit to `main` and every pull request flows through the pipeline. If tes
 | Registries | GitHub Container Registry (GHCR), Amazon ECR |
 | Hosting | AWS Lambda (container image + AWS Lambda Web Adapter, vendored and checksum-verified), public Function URL |
 | Cloud auth | GitHub OIDC → least-privilege IAM role (no stored AWS keys) |
-| Notifications | Webhook (webhook.site) with a structured JSON payload |
+| Notifications | Discord webhook (colour-coded embed card); any other webhook URL receives plain JSON |
 
 ## Repository Structure
 
@@ -94,9 +94,9 @@ Triggered on **push to `main`**, **pull requests targeting `main`**, and manual 
 1. **Run Unit Tests & Lint**: `ruff check app/`, then `pytest` (8 tests covering every endpoint, fallback behavior and 422 validation).
 2. **Build, Scan & Publish**: builds the image and scans it with Trivy. Any fixable HIGH or CRITICAL CVE fails the pipeline. On `main` only, the image is pushed to GHCR (`latest` + commit sha) and to Amazon ECR.
 3. **Deploy to AWS Lambda** (`main` only, when AWS is configured): records the running image, rolls out the new one, then smoke-tests `/` and `/chat` on the live URL. If the smoke test fails, the previous image is restored automatically. The run appears under the repository's **production** environment with the live URL.
-4. **Notify**: posts a JSON summary to the webhook for every run, PRs included.
+4. **Notify**: posts a status card to Discord for every run, PRs included: green for `DEPLOYED` / `PR_CHECKS_PASSED`, red for `BLOCKED` / `FAILED`, orange for `ROLLED_BACK`, with the failed stage, fix advice and a link to the run. If the secret holds a non-Discord URL, the same summary is sent as plain JSON instead.
 
-Example notifications:
+The summary behind each card (also what a non-Discord webhook receives):
 
 ```json
 {"service": "chatbot-api", "status": "DEPLOYED", "source": "main", "commit": "4e8970e",
@@ -113,7 +113,7 @@ Possible `status` values: `DEPLOYED`, `PUBLISHED` (AWS not configured), `PR_CHEC
 
 | Secret | Purpose |
 |---|---|
-| `NOTIFICATION_WEBHOOK` | webhook.site URL that receives the JSON notifications |
+| `NOTIFICATION_WEBHOOK` | Discord webhook URL (Server Settings → Integrations → Webhooks) |
 | `AWS_ROLE_ARN` | IAM role printed by `infra/aws-bootstrap.sh`. If it is missing, the deploy stage is skipped and the pipeline still passes. |
 | `GITHUB_TOKEN` | Provided automatically; granted `packages: write` for GHCR |
 
@@ -145,7 +145,7 @@ Close these PRs without merging.
 | `docs/screenshots/actions-run.png` | Green run: tests → build/scan/publish → deploy → notify |
 | `docs/screenshots/ghcr-package.png` | Published image in GitHub Packages |
 | `docs/screenshots/live-url.png` | The chatbot answering on its AWS Lambda URL |
-| `docs/screenshots/webhook-deployed.png` | `DEPLOYED` notification on webhook.site |
-| `docs/screenshots/webhook-blocked.png` | `BLOCKED` notification from a demo PR |
+| `docs/screenshots/webhook-deployed.png` | `DEPLOYED` card in Discord |
+| `docs/screenshots/webhook-blocked.png` | `BLOCKED` card in Discord from a demo PR |
 
 <!-- Paste the screenshots above into docs/screenshots/ to complete the report -->

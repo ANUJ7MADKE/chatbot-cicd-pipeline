@@ -237,11 +237,40 @@ jobs:
           fi
 
           # jq builds the JSON so no value can break the payload
-          jq -n \
+          PAYLOAD=$(jq -n \
             --arg status "$STATUS" --arg stage "$STAGE" --arg source "$SOURCE" \
             --arg commit "${SHA:0:7}" --arg advice "$ADVICE" --arg live_url "$LIVE_URL" \
             --arg image "${IMAGE:-}" --arg run_url "$RUN_URL" \
             '{service: "chatbot-api", status: $status, failed_stage: $stage, source: $source,
               commit: $commit, advice: $advice, live_url: $live_url, image: $image, run_url: $run_url}
-             | with_entries(select(.value != ""))' \
-            | curl -fsS -H "Content-Type: application/json" -d @- "$WEBHOOK"
+             | with_entries(select(.value != ""))')
+
+          # Discord needs its own message format: turn the summary into a coloured embed card.
+          # Any other webhook (Slack-compatible relays, webhook.site, ...) receives the plain JSON.
+          case "$WEBHOOK" in
+            https://discord.com/api/webhooks/*|https://*.discord.com/api/webhooks/*|https://discordapp.com/api/webhooks/*)
+              PAYLOAD=$(jq --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+                ({DEPLOYED: 3066993, PUBLISHED: 3066993, PR_CHECKS_PASSED: 3066993,
+                  BLOCKED: 15158332, FAILED: 15158332, ROLLED_BACK: 15105570}[.status]) as $color
+                | ({DEPLOYED: "✅", PUBLISHED: "📦", PR_CHECKS_PASSED: "🟢",
+                    BLOCKED: "🚨", FAILED: "❌", ROLLED_BACK: "⏪"}[.status]) as $icon
+                | {username: "Chatbot CI/CD",
+                   embeds: [{
+                     title: "\($icon) \(.status) · \(.service)",
+                     url: .run_url,
+                     description: .advice,
+                     color: $color,
+                     fields: [
+                       {name: "Source", value: .source, inline: true},
+                       {name: "Commit", value: "`\(.commit)`", inline: true},
+                       (if .failed_stage then {name: "Failed stage", value: .failed_stage, inline: true} else empty end),
+                       (if .live_url then {name: "Live URL", value: .live_url} else empty end),
+                       (if .image then {name: "Image", value: "`\(.image)`"} else empty end)
+                     ],
+                     footer: {text: "GitHub Actions · Chatbot CI/CD Pipeline"},
+                     timestamp: $ts
+                   }]}' <<<"$PAYLOAD")
+              ;;
+          esac
+
+          curl -fsS -H "Content-Type: application/json" -d "$PAYLOAD" "$WEBHOOK"
